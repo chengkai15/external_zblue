@@ -27,6 +27,7 @@
 //#include "a2dp_internal.h"
 //#include "avctp_internal.h"
 //#include "avrcp_internal.h"
+#include "did_internal.h"
 #include "rfcomm_internal.h"
 #include "sdp_internal.h"
 
@@ -2136,5 +2137,9 @@ void bt_l2cap_br_init(struct bt_dev *hdev)
 
 	if (IS_ENABLED(CONFIG_BT_AVRCP_CTTG)) {
 		bt_avrcp_cttg_init();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_DID)) {
+		bt_did_init();
 	}
 }
