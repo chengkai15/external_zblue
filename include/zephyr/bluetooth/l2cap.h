@@ -537,6 +537,22 @@ static inline int bt_l2cap_br_server_register(struct bt_l2cap_server *server)
 }
 #endif
 
+/** @brief Unregister L2CAP server on BR/EDR oriented connection.
+ *
+ *  Unregister L2CAP server for a PSM.
+ *
+ *  @param server Server structure.
+ *
+ *  @return 0 in case of success or negative value in case of error.
+ */
+int bt_l2cap_br_server_unregister_mc(uint8_t dev_id, struct bt_l2cap_server *server);
+#ifdef CONFIG_BT_ORIGINAL_API
+static inline int bt_l2cap_br_server_unregister(struct bt_l2cap_server *server)
+{
+	return bt_l2cap_br_server_unregister_mc(0, server);
+}
+#endif
+
 /** @brief Connect Enhanced Credit Based L2CAP channels
  *
  *  Connect up to 5 L2CAP channels by PSM, once the connection is completed

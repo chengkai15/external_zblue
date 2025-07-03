@@ -1200,6 +1200,27 @@ int bt_l2cap_br_server_register_mc(uint8_t dev_id, struct bt_l2cap_server *serve
 	return 0;
 }
 
+int bt_l2cap_br_server_unregister_mc(uint8_t dev_id, struct bt_l2cap_server *server)
+{
+	struct bt_dev *hdev = bt_dev_get(dev_id);
+
+	if (!hdev) {
+		return -ENODEV;
+	}
+
+	CHECKIF(server == NULL) {
+		return -EINVAL;
+	}
+
+	if (!sys_slist_find_and_remove(&hdev->l2cap_br_ctx->br_servers, &server->node)) {
+		return -ENOENT;
+	}
+
+	LOG_DBG("PSM 0x%04x unregistered", server->psm);
+
+	return 0;
+}
+
 static void l2cap_br_send_reject(struct bt_conn *conn, uint8_t ident,
 				 uint16_t reason, void *data, uint8_t data_len)
 {
