@@ -36,3 +36,8 @@ zephyr_library_sources_ifdef(
   CONFIG_BT_DID
   did.c
   )
+
+zephyr_library_sources_ifdef(
+  CONFIG_BT_SPP
+  spp.c
+  )
