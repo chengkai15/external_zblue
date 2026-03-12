@@ -335,7 +335,10 @@ int hfp_hf_send_cmd(struct bt_hfp_hf *hf, at_resp_cb_t resp,
 	va_list vargs;
 	int ret;
 
-	buf = bt_rfcomm_create_pdu(&hf_pool);
+	buf = bt_conn_create_pdu_timeout(&hf_pool,
+			sizeof(struct bt_l2cap_hdr) +
+			sizeof(struct bt_rfcomm_hdr) + 1,
+			K_NO_WAIT);
 	if (!buf) {
 		LOG_ERR("No Buffers!");
 		return -ENOMEM;
