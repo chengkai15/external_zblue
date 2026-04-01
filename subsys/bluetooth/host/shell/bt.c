@@ -3213,7 +3213,7 @@ static int cmd_subrate_set_defaults(const struct shell *sh, size_t argc, char *a
 		.supervision_timeout = shell_strtoul(argv[5], 10, &err) * 100, /* 10ms units */
 	};
 
-	err = bt_conn_le_subrate_set_defaults(&params);
+	err = bt_conn_le_subrate_set_defaults(0, &params);
 	if (err) {
 		shell_error(sh, "bt_conn_le_subrate_set_defaults returned error %d", err);
 		return -ENOEXEC;

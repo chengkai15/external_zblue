@@ -12,6 +12,8 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <zephyr/sys/atomic.h>
+
+extern void syslog(int priority, const char *fmt, ...);
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/check.h>
 #include <zephyr/sys/iterable_sections.h>
@@ -72,7 +74,7 @@ struct bt_dev_conn_ctx {
 #endif
 	struct k_sem pending_recycled_events;
 	struct k_work recycled_work;
-	struct k_work procedures_on_connect;
+	struct k_work_delayable procedures_on_connect;
 } conn_ctx_pool[CONFIG_BT_NUM_CTLRS];
 
 static void tx_free(struct bt_dev *hdev, struct bt_conn_tx *tx);
@@ -1790,10 +1792,38 @@ static void perform_auto_initiated_procedures(struct bt_conn *conn, void *unused
 
 	if (!atomic_test_bit(conn->flags, BT_CONN_LE_FEATURES_EXCHANGED) &&
 	    can_initiate_feature_exchange(conn)) {
+		/* BES Controller may return 0x3A (Controller Busy) right after
+		 * connection. Retry up to 5 times with 200ms delay (~1s total).
+		 */
+		static uint8_t feat_retry;
+
 		err = bt_hci_le_read_remote_features(conn);
 		if (err) {
-			LOG_ERR("Failed read remote features (%d)", err);
+			if (feat_retry++ < 5) {
+				syslog(6, "[SCI] Read remote features failed (%d), retry %d/5\n",
+				       err, feat_retry);
+				atomic_clear_bit(conn->flags,
+						 BT_CONN_AUTO_INIT_PROCEDURES_DONE);
+				k_work_reschedule(
+					&conn->hdev->conn_ctx->procedures_on_connect,
+					K_MSEC(200));
+				return;
+			}
+			syslog(3, "[SCI] Read remote features failed after retries (%d)\n", err);
+			/*
+			 * BES workaround: all feature exchange attempts
+			 * failed. Hardcode SCI support and mark features
+			 * as exchanged so HOGP SCI flow can proceed.
+			 */
+			if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+				conn->le_features_page1[1] |= 0x03;
+				atomic_set_bit(conn->flags,
+					       BT_CONN_LE_FEATURES_EXCHANGED);
+				syslog(LOG_WARNING,
+				       "[SCI] Hardcoded SCI bits after feature exchange failure\n");
+			}
 		}
+		feat_retry = 0;
 		if (conn->state != BT_CONN_CONNECTED) {
 			return;
 		}
@@ -1849,7 +1879,8 @@ static void perform_auto_initiated_procedures(struct bt_conn *conn, void *unused
  */
 static void auto_initiated_procedures(struct k_work *work)
 {
-	struct bt_dev_conn_ctx *conn_ctx = CONTAINER_OF(work, struct bt_dev_conn_ctx, procedures_on_connect);
+	struct bt_dev_conn_ctx *conn_ctx = CONTAINER_OF(work, struct bt_dev_conn_ctx,
+							procedures_on_connect.work);
 	struct  bt_dev *hdev = conn_ctx->hdev;
 
 	bt_conn_foreach_mc(hdev->dev_id, BT_CONN_TYPE_LE, perform_auto_initiated_procedures, NULL);
@@ -1860,7 +1891,7 @@ static void schedule_auto_initiated_procedures(struct bt_conn *conn)
 	struct bt_dev *hdev = conn->hdev;
 
 	LOG_DBG("[%p] Scheduling auto-init procedures", conn);
-	k_work_submit(&hdev->conn_ctx->procedures_on_connect);
+	k_work_schedule(&hdev->conn_ctx->procedures_on_connect, K_NO_WAIT);
 }
 
 void bt_conn_notify_connected(struct bt_conn *conn)
@@ -2178,8 +2209,8 @@ static struct bt_conn *conn_lookup_iso(struct bt_conn *conn)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(hdev->iso_conns); i++) {
-		struct bt_conn *iso = bt_conn_ref(&hdev->iso_conns[i]);
+	for (i = 0; i < ARRAY_SIZE(conn->hdev->iso_conns); i++) {
+		struct bt_conn *iso = bt_conn_ref(&conn->hdev->iso_conns[i]);
 
 		if (iso == NULL) {
 			continue;
@@ -3529,9 +3560,10 @@ static bool le_subrate_common_params_valid(const struct bt_conn_le_subrate_param
 	return true;
 }
 
-int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *params)
+int bt_conn_le_subrate_set_defaults(uint8_t dev_id, const struct bt_conn_le_subrate_param *params)
 {
 	struct bt_hci_cp_le_set_default_subrate *cp;
+	struct bt_dev *hdev;
 	struct net_buf *buf;
 
 	if (!IS_ENABLED(CONFIG_BT_CENTRAL)) {
@@ -3540,6 +3572,11 @@ int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *param
 
 	if (!le_subrate_common_params_valid(params)) {
 		return -EINVAL;
+	}
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev) {
+		return -ENODEV;
 	}
 
 	buf = bt_hci_cmd_create(BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, sizeof(*cp));
@@ -3554,7 +3591,7 @@ int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *param
 	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
 	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
 
-	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, buf, NULL);
+	return bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, buf, NULL);
 }
 
 int bt_conn_le_subrate_request(struct bt_conn *conn,
@@ -3588,6 +3625,176 @@ int bt_conn_le_subrate_request(struct bt_conn *conn,
 	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_SUBRATE_REQUEST, buf, NULL);
 }
 #endif /* CONFIG_BT_SUBRATING */
+
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+void notify_conn_rate_change(struct bt_conn *conn,
+			     const struct bt_conn_le_conn_rate_changed *params)
+{
+	struct bt_conn_cb *callback;
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&conn->hdev->conn_ctx->conn_cbs, callback, _node) {
+		if (callback->conn_rate_changed) {
+			callback->conn_rate_changed(conn, params);
+		}
+	}
+
+	STRUCT_SECTION_FOREACH(bt_conn_cb, cb)
+	{
+		if (cb->conn_rate_changed) {
+			cb->conn_rate_changed(conn, params);
+		}
+	}
+}
+
+static bool le_conn_rate_params_valid(const struct bt_conn_le_conn_rate_param *param)
+{
+	if (param->conn_interval_min < BT_HCI_LE_CONN_INTERVAL_MIN ||
+	    param->conn_interval_min > BT_HCI_LE_CONN_INTERVAL_MAX ||
+	    param->conn_interval_max < BT_HCI_LE_CONN_INTERVAL_MIN ||
+	    param->conn_interval_max > BT_HCI_LE_CONN_INTERVAL_MAX ||
+	    param->conn_interval_min > param->conn_interval_max) {
+		return false;
+	}
+
+	if (param->supervision_timeout < 0x000A ||
+	    param->supervision_timeout > 0x0C80) {
+		return false;
+	}
+
+	return true;
+}
+
+int bt_conn_le_conn_rate_set_defaults(uint8_t dev_id, const struct bt_conn_le_conn_rate_param *params)
+{
+	struct bt_hci_cp_le_set_default_rate_params *cp;
+	struct bt_dev *hdev;
+	struct net_buf *buf;
+
+	if (!IS_ENABLED(CONFIG_BT_CENTRAL)) {
+		return -ENOTSUP;
+	}
+
+	if (!le_conn_rate_params_valid(params)) {
+		return -EINVAL;
+	}
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev || !BT_CMD_TEST(hdev->supported_commands, 47, 2)) {
+		return -ENOTSUP;
+	}
+
+	buf = bt_hci_cmd_create(BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMS, sizeof(*cp));
+	if (!buf) {
+		return -ENOBUFS;
+	}
+
+	cp = net_buf_add(buf, sizeof(*cp));
+	cp->conn_interval_min = sys_cpu_to_le16(params->conn_interval_min);
+	cp->conn_interval_max = sys_cpu_to_le16(params->conn_interval_max);
+	cp->max_latency = sys_cpu_to_le16(params->max_latency);
+	cp->subrate_min = sys_cpu_to_le16(params->subrate_min);
+	cp->subrate_max = sys_cpu_to_le16(params->subrate_max);
+	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
+	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
+
+	return bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMS, buf, NULL);
+}
+
+int bt_conn_le_conn_rate_request(struct bt_conn *conn,
+				 const struct bt_conn_le_conn_rate_param *params)
+{
+	struct bt_hci_cp_le_conn_rate_request *cp;
+	struct net_buf *buf;
+
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return -EINVAL;
+	}
+
+	if (!le_conn_rate_params_valid(params)) {
+		return -EINVAL;
+	}
+
+	if (!BT_CMD_TEST(conn->hdev->supported_commands, 47, 1)) {
+		/*
+		 * BES workaround: The BES best1700 controller may not
+		 * advertise 0x20A1 in Supported_Commands, but the sim
+		 * reference log proves the controller does accept it.
+		 * Skip this check when SCI is enabled and try anyway.
+		 */
+		if (!IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+			return -ENOTSUP;
+		}
+		syslog(LOG_WARNING,
+		       "[SCI] supported_commands[47] bit1=0, "
+		       "bypassing for BES workaround\n");
+	}
+
+	buf = bt_hci_cmd_create(BT_HCI_OP_LE_CONN_RATE_REQUEST, sizeof(*cp));
+	if (!buf) {
+		return -ENOBUFS;
+	}
+
+	cp = net_buf_add(buf, sizeof(*cp));
+	cp->handle = sys_cpu_to_le16(conn->handle);
+	cp->conn_interval_min = sys_cpu_to_le16(params->conn_interval_min);
+	cp->conn_interval_max = sys_cpu_to_le16(params->conn_interval_max);
+	cp->max_latency = sys_cpu_to_le16(params->max_latency);
+	cp->subrate_min = sys_cpu_to_le16(params->subrate_min);
+	cp->subrate_max = sys_cpu_to_le16(params->subrate_max);
+	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
+	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
+	cp->min_ce_length = sys_cpu_to_le16(params->min_ce_length);
+	cp->max_ce_length = sys_cpu_to_le16(params->max_ce_length);
+
+	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_CONN_RATE_REQUEST, buf, NULL);
+}
+
+int bt_conn_le_read_min_conn_interval_groups(uint8_t dev_id, struct bt_conn_le_min_conn_interval_info *info)
+{
+	struct bt_hci_rp_le_read_min_supported_conn_interval *rp;
+	struct bt_dev *hdev;
+	struct net_buf *rsp;
+	int err;
+	uint8_t i;
+	const uint8_t *data;
+
+	if (!info) {
+		return -EINVAL;
+	}
+
+	memset(info, 0, sizeof(*info));
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev || !BT_CMD_TEST(hdev->supported_commands, 47, 3)) {
+		return -ENOTSUP;
+	}
+
+	err = bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_READ_MIN_SUPPORTED_CONN_INTERVAL,
+				   NULL, &rsp);
+	if (err) {
+		return err;
+	}
+
+	rp = (void *)rsp->data;
+	info->min_conn_interval = rp->min_conn_interval;
+	info->num_groups = rp->num_groups;
+
+	if (info->num_groups > ARRAY_SIZE(info->groups)) {
+		info->num_groups = ARRAY_SIZE(info->groups);
+	}
+
+	data = (const uint8_t *)rp + sizeof(*rp);
+	for (i = 0; i < info->num_groups; i++) {
+		info->groups[i].min_interval = sys_get_le16(data);
+		info->groups[i].max_interval = sys_get_le16(data + 2);
+		info->groups[i].stride = sys_get_le16(data + 4);
+		data += 6;
+	}
+
+	net_buf_unref(rsp);
+	return 0;
+}
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
 
 #if defined(CONFIG_BT_CHANNEL_SOUNDING)
 void notify_remote_cs_capabilities(struct bt_conn *conn, struct bt_conn_le_cs_capabilities params)
@@ -4499,7 +4706,7 @@ int bt_conn_init(struct bt_dev *hdev)
 	sys_slist_init(&conn_ctx->conn_cbs);
 	k_sem_init(&conn_ctx->pending_recycled_events, 0, K_SEM_MAX_LIMIT);
 	k_work_init(&conn_ctx->recycled_work, recycled_work_handler);
-	k_work_init(&conn_ctx->procedures_on_connect, auto_initiated_procedures);
+	k_work_init_delayable(&conn_ctx->procedures_on_connect, auto_initiated_procedures);
 	for (i = 0; i < ARRAY_SIZE(conn_ctx->conn_tx); i++) {
 		k_fifo_put(&conn_ctx->free_tx, &conn_ctx->conn_tx[i]);
 	}

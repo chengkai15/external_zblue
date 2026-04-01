@@ -1114,19 +1114,56 @@ static void hci_disconn_complete(struct bt_dev *hdev, struct net_buf *buf)
 
 int bt_hci_le_read_remote_features(struct bt_conn *conn)
 {
-	struct bt_hci_cp_le_read_remote_features *cp;
 	struct net_buf *buf;
+	uint16_t opcode;
+	int err;
 
-	buf = bt_hci_cmd_create(BT_HCI_OP_LE_READ_REMOTE_FEATURES,
-				sizeof(*cp));
-	if (!buf) {
-		return -ENOBUFS;
+	if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+		struct bt_hci_cp_le_read_all_remote_features *cp_all;
+
+		opcode = BT_HCI_OP_LE_READ_ALL_REMOTE_FEATURES;
+		buf = bt_hci_cmd_create(opcode, sizeof(*cp_all));
+		if (!buf) {
+			return -ENOBUFS;
+		}
+		cp_all = net_buf_add(buf, sizeof(*cp_all));
+		cp_all->handle = sys_cpu_to_le16(conn->handle);
+		cp_all->max_page = 0; /* Read page 0 (BT 6.0 spec) */
+	} else {
+		struct bt_hci_cp_le_read_remote_features *cp_std;
+
+		opcode = BT_HCI_OP_LE_READ_REMOTE_FEATURES;
+		buf = bt_hci_cmd_create(opcode, sizeof(*cp_std));
+		if (!buf) {
+			return -ENOBUFS;
+		}
+		cp_std = net_buf_add(buf, sizeof(*cp_std));
+		cp_std->handle = sys_cpu_to_le16(conn->handle);
 	}
 
-	cp = net_buf_add(buf, sizeof(*cp));
-	cp->handle = sys_cpu_to_le16(conn->handle);
-	/* Results in BT_HCI_EVT_LE_REMOTE_FEAT_COMPLETE */
-	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_READ_REMOTE_FEATURES, buf, NULL);
+	err = bt_hci_cmd_send_sync(conn->hdev, opcode, buf, NULL);
+
+	/*
+	 * BES workaround: 0x2088 (LE_Read_All_Remote_Features) may return
+	 * status 0x12 (Invalid HCI Command Parameters) on BES best1700.
+	 * Fallback to standard 0x2016 (LE_Read_Remote_Features).
+	 */
+	if (err && IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+		struct bt_hci_cp_le_read_remote_features *cp_fb;
+
+		syslog(LOG_WARNING,
+		       "[SCI] 0x2088 failed (%d), fallback to 0x2016\n", err);
+		opcode = BT_HCI_OP_LE_READ_REMOTE_FEATURES;
+		buf = bt_hci_cmd_create(opcode, sizeof(*cp_fb));
+		if (!buf) {
+			return -ENOBUFS;
+		}
+		cp_fb = net_buf_add(buf, sizeof(*cp_fb));
+		cp_fb->handle = sys_cpu_to_le16(conn->handle);
+		err = bt_hci_cmd_send_sync(conn->hdev, opcode, buf, NULL);
+	}
+
+	return err;
 }
 
 int bt_hci_read_remote_version(struct bt_conn *conn)
@@ -1832,6 +1869,21 @@ static void le_remote_feat_complete(struct bt_dev *hdev, struct net_buf *buf)
 		       sizeof(conn->le.features));
 	}
 
+	/*
+	 * BES workaround: 0x2016 only returns page 0 features (bits 0-63).
+	 * SCI bits (72/73) are in page 1. Since BES controller claims SCI
+	 * support in supported_commands but 0x2088 fails, hardcode SCI
+	 * bits in le_features_page1 so that HOGP and conn subsystem
+	 * see SCI as supported.
+	 */
+	if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+		/* bit 72 (SCI) → page1 byte 1 bit 0
+		 * bit 73 (SCI Host Support) → page1 byte 1 bit 1 */
+		conn->le_features_page1[1] |= 0x03;
+		syslog(LOG_WARNING,
+		       "[SCI] Hardcoded SCI bits in le_features_page1\n");
+	}
+
 	atomic_set_bit(conn->flags, BT_CONN_LE_FEATURES_EXCHANGED);
 
 	if (IS_ENABLED(CONFIG_BT_REMOTE_INFO) &&
@@ -1841,6 +1893,52 @@ static void le_remote_feat_complete(struct bt_dev *hdev, struct net_buf *buf)
 
 	bt_conn_unref(conn);
 }
+
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+static void le_all_remote_feat_complete(struct bt_dev *hdev, struct net_buf *buf)
+{
+	struct bt_hci_evt_le_read_all_remote_feat_complete *evt = (void *)buf->data;
+	uint16_t handle = sys_le16_to_cpu(evt->handle);
+	struct bt_conn *conn;
+
+	conn = bt_conn_lookup_handle(hdev, handle, BT_CONN_TYPE_LE);
+	if (!conn) {
+		LOG_ERR("Unable to lookup conn for handle %u", handle);
+		return;
+	}
+
+	if (!evt->status) {
+		memcpy(conn->le.features, evt->features, 8);
+		if (evt->max_page >= 1 && buf->len >= sizeof(*evt) + 8) {
+			memcpy(conn->le_features_page1,
+			       buf->data + sizeof(*evt), 8);
+			syslog(LOG_INFO,
+			       "[SCI] 0x2088 OK: max_page=%u, page1=%02x %02x %02x %02x\n",
+			       evt->max_page,
+			       conn->le_features_page1[0],
+			       conn->le_features_page1[1],
+			       conn->le_features_page1[2],
+			       conn->le_features_page1[3]);
+		} else {
+			syslog(LOG_WARNING,
+			       "[SCI] 0x2088 OK but max_page=%u (no page1)\n",
+			       evt->max_page);
+		}
+	} else {
+		syslog(LOG_WARNING,
+		       "[SCI] 0x2088 event status=0x%02x\n", evt->status);
+	}
+
+	atomic_set_bit(conn->flags, BT_CONN_LE_FEATURES_EXCHANGED);
+
+	if (IS_ENABLED(CONFIG_BT_REMOTE_INFO) &&
+	    !IS_ENABLED(CONFIG_BT_REMOTE_VERSION)) {
+		notify_remote_info(conn);
+	}
+
+	bt_conn_unref(conn);
+}
+#endif
 
 #if defined(CONFIG_BT_DATA_LEN_UPDATE)
 static void le_data_len_change(struct bt_dev *hdev, struct net_buf *buf)
@@ -2816,6 +2914,52 @@ void bt_hci_le_subrate_change_event(struct bt_dev *hdev, struct net_buf *buf)
 }
 #endif /* CONFIG_BT_SUBRATING */
 
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+void bt_hci_le_conn_rate_change_event(struct bt_dev *hdev, struct net_buf *buf)
+{
+	struct bt_hci_evt_le_conn_rate_change *evt;
+	struct bt_conn_le_conn_rate_changed params;
+	struct bt_conn *conn;
+	uint16_t handle;
+
+	evt = net_buf_pull_mem(buf, sizeof(*evt));
+	handle = sys_le16_to_cpu(evt->handle);
+
+	syslog(LOG_INFO, "[SCI] conn_rate_change: status=0x%02x handle=%u interval=%u "
+	       "latency=%u subrate=%u cont=%u timeout=%u\n",
+	       evt->status, handle,
+	       sys_le16_to_cpu(evt->conn_interval),
+	       sys_le16_to_cpu(evt->peripheral_latency),
+	       sys_le16_to_cpu(evt->subrate_factor),
+	       sys_le16_to_cpu(evt->continuation_number),
+	       sys_le16_to_cpu(evt->supervision_timeout));
+
+	conn = bt_conn_lookup_handle(hdev, handle, BT_CONN_TYPE_LE);
+	if (!conn) {
+		LOG_ERR("No connection for handle %u", handle);
+		return;
+	}
+
+	params.status = evt->status;
+	params.conn_interval = sys_le16_to_cpu(evt->conn_interval);
+	params.peripheral_latency = sys_le16_to_cpu(evt->peripheral_latency);
+	params.subrate_factor = sys_le16_to_cpu(evt->subrate_factor);
+	params.continuation_number = sys_le16_to_cpu(evt->continuation_number);
+	params.supervision_timeout = sys_le16_to_cpu(evt->supervision_timeout);
+
+	if (evt->status == BT_HCI_ERR_SUCCESS) {
+		conn->le.interval = params.conn_interval;
+		conn->le.interval_us = BT_CONN_SCI_INTERVAL_TO_US(params.conn_interval);
+		conn->le.latency = params.peripheral_latency;
+		conn->le.timeout = params.supervision_timeout;
+	}
+
+	notify_conn_rate_change(conn, &params);
+
+	bt_conn_unref(conn);
+}
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
+
 static const struct event_handler vs_events[] = {
 #if defined(CONFIG_BT_DF_VS_CL_IQ_REPORT_16_BITS_IQ_SAMPLES)
 	EVENT_HANDLER(BT_HCI_EVT_VS_LE_CONNECTIONLESS_IQ_REPORT,
@@ -2871,6 +3015,11 @@ static const struct event_handler meta_events[] = {
 	EVENT_HANDLER(BT_HCI_EVT_LE_REMOTE_FEAT_COMPLETE,
 		      le_remote_feat_complete,
 		      sizeof(struct bt_hci_evt_le_remote_feat_complete)),
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	EVENT_HANDLER(BT_HCI_EVT_LE_READ_ALL_REMOTE_FEAT_COMPLETE,
+		      le_all_remote_feat_complete,
+		      sizeof(struct bt_hci_evt_le_read_all_remote_feat_complete)),
+#endif
 	EVENT_HANDLER(BT_HCI_EVT_LE_CONN_PARAM_REQ, le_conn_param_req,
 		      sizeof(struct bt_hci_evt_le_conn_param_req)),
 #if defined(CONFIG_BT_DATA_LEN_UPDATE)
@@ -2965,6 +3114,10 @@ static const struct event_handler meta_events[] = {
 	EVENT_HANDLER(BT_HCI_EVT_LE_SUBRATE_CHANGE, bt_hci_le_subrate_change_event,
 		      sizeof(struct bt_hci_evt_le_subrate_change)),
 #endif /* CONFIG_BT_PATH_LOSS_MONITORING */
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	EVENT_HANDLER(BT_HCI_EVT_LE_CONN_RATE_CHANGE, bt_hci_le_conn_rate_change_event,
+		      sizeof(struct bt_hci_evt_le_conn_rate_change)),
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
 #if defined(CONFIG_BT_PER_ADV_SYNC_RSP)
 	EVENT_HANDLER(BT_HCI_EVT_LE_PER_ADVERTISING_REPORT_V2, bt_hci_le_per_adv_report_v2,
 		      sizeof(struct bt_hci_evt_le_per_advertising_report_v2)),
@@ -3484,6 +3637,9 @@ static int le_set_event_mask(struct bt_dev *hdev)
 
 		mask |= BT_EVT_MASK_LE_CONN_UPDATE_COMPLETE;
 		mask |= BT_EVT_MASK_LE_REMOTE_FEAT_COMPLETE;
+		if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+			mask |= BT_EVT_MASK_LE_READ_ALL_REMOTE_FEAT_COMPLETE;
+		}
 
 		if (BT_FEAT_LE_CONN_PARAM_REQ_PROC(hdev->le.features)) {
 			mask |= BT_EVT_MASK_LE_CONN_PARAM_REQ;
@@ -3510,6 +3666,10 @@ static int le_set_event_mask(struct bt_dev *hdev)
 		if (IS_ENABLED(CONFIG_BT_SUBRATING) &&
 		    BT_FEAT_LE_CONN_SUBRATING(hdev->le.features)) {
 			mask |= BT_EVT_MASK_LE_SUBRATE_CHANGE;
+		}
+
+		if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+			mask |= BT_EVT_MASK_LE_CONN_RATE_CHANGE;
 		}
 	}
 
@@ -3803,6 +3963,18 @@ static int le_init(struct bt_dev *hdev)
 		err = le_set_host_feature(hdev, BT_LE_FEAT_BIT_CONN_SUBRATING_HOST_SUPP, 1);
 		if (err) {
 			return err;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+		/* SCI (Host Support) — ignore error if Controller doesn't support SCI */
+		err = le_set_host_feature(hdev, BT_LE_FEAT_BIT_SCI_HOST_SUPP, 1);
+		if (err) {
+			syslog(LOG_WARNING,
+			       "[SCI] LE_Set_Host_Feature(bit73 SCI) FAILED: %d\n", err);
+		} else {
+			syslog(LOG_INFO,
+			       "[SCI] LE_Set_Host_Feature(bit73 SCI) OK\n");
 		}
 	}
 

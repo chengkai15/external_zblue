@@ -228,5 +228,12 @@ config BT_SAMPLE_HFP_HF
   help
     Enable Bluetooth hfp-hf example
 
+config BT_SAMPLE_ISO_TEST
+  bool "Enable ISO CIS test tool"
+  default n
+  depends on BT_ISO_CENTRAL && BT_ISO_PERIPHERAL
+  help
+    Enable ISO CIS central/peripheral test tool
+
 endif
 

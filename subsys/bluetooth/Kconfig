@@ -209,6 +209,30 @@ config BT_SUBRATING
 	  Enable support for LE Connection Subrating feature that is defined in the
 	  Bluetooth Core specification, Version 5.4 | Vol 6, Part B, Section 4.6.35.
 
+config BT_LE_EXTENDED_FEAT_SET
+	bool "LE Extended Feature Set"
+	help
+	  Enable support for reading all local and remote LE features
+	  using HCI_LE_Read_All_Local_Supported_Features (0x2087) and
+	  HCI_LE_Read_All_Remote_Features (0x2088) commands.
+
+config BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE
+	int "Maximum LE feature page number"
+	default 1
+	depends on BT_LE_EXTENDED_FEAT_SET
+	help
+	  Maximum LE feature page number supported. Page 0 contains bits 0-63,
+	  page 1 contains bits 64-127 (including SCI bits 72-73).
+
+config BT_SHORTER_CONNECTION_INTERVALS
+	bool "LE Shorter Connection Intervals (SCI) [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	depends on BT_LE_EXTENDED_FEAT_SET
+	depends on BT_SUBRATING
+	help
+	  Enable support for BT 6.2 Shorter Connection Intervals feature.
+	  Allows LE ACL connection intervals down to 375us (from 7.5ms minimum).
+
 config BT_CHANNEL_SOUNDING
 	bool "Channel Sounding [EXPERIMENTAL]"
 	select EXPERIMENTAL

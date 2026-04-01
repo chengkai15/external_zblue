@@ -24,3 +24,10 @@ endif()
 if(CONFIG_BT_ZEPHYR_NUS)
   add_subdirectory(nus)
 endif()
+
+if(CONFIG_BT_HOGP_DEVICE)
+  add_subdirectory(hogp)
+endif()
+
+if(CONFIG_BT_HOGP_HOST)
+endif()

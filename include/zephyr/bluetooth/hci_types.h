@@ -208,6 +208,9 @@ struct bt_hci_cmd_hdr {
 #define BT_LE_FEAT_BIT_CHANNEL_SOUNDING         46
 #define BT_LE_FEAT_BIT_CHANNEL_SOUNDING_HOST    47
 
+#define BT_LE_FEAT_BIT_SCI                      72
+#define BT_LE_FEAT_BIT_SCI_HOST_SUPP            73
+
 #define BT_LE_FEAT_TEST(feat, n)                (feat[(n) >> 3] & \
 						 BIT((n) & 7))
 
@@ -279,6 +282,11 @@ struct bt_hci_cmd_hdr {
 						  BT_LE_FEAT_BIT_CHANNEL_SOUNDING)
 #define BT_FEAT_LE_CHANNEL_SOUNDING_HOST(feat)    BT_LE_FEAT_TEST(feat, \
 						  BT_LE_FEAT_BIT_CHANNEL_SOUNDING_HOST)
+
+#define BT_FEAT_LE_SCI(feat)                      BT_LE_FEAT_TEST(feat, \
+						  BT_LE_FEAT_BIT_SCI)
+#define BT_FEAT_LE_SCI_HOST_SUPP(feat)            BT_LE_FEAT_TEST(feat, \
+						  BT_LE_FEAT_BIT_SCI_HOST_SUPP)
 
 #define BT_FEAT_LE_CIS(feat)            (BT_FEAT_LE_CIS_CENTRAL(feat) | \
 					BT_FEAT_LE_CIS_PERIPHERAL(feat))
@@ -870,6 +878,67 @@ struct bt_hci_cp_le_subrate_request {
 
 #define BT_HCI_OP_LE_SET_DEFAULT_SUBRATE BT_OP(BT_OGF_LE, 0x007D) /* 0x207D */
 #define BT_HCI_OP_LE_SUBRATE_REQUEST     BT_OP(BT_OGF_LE, 0x007E) /* 0x207E */
+
+#define BT_HCI_OP_LE_READ_ALL_LOCAL_FEATURES BT_OP(BT_OGF_LE, 0x0087) /* 0x2087 */
+struct bt_hci_rp_le_read_all_local_features {
+	uint8_t status;
+	uint8_t max_page;
+	uint8_t features[8]; /* Page 0 features; extended pages follow */
+} __packed;
+
+#define BT_HCI_OP_LE_READ_ALL_REMOTE_FEATURES BT_OP(BT_OGF_LE, 0x0088) /* 0x2088 */
+struct bt_hci_cp_le_read_all_remote_features {
+	uint16_t handle;
+	uint8_t  max_page;
+} __packed;
+
+#define BT_HCI_EVT_LE_READ_ALL_REMOTE_FEAT_COMPLETE 0x2b
+struct bt_hci_evt_le_read_all_remote_feat_complete {
+	uint8_t status;
+	uint16_t handle;
+	uint8_t max_page;
+	uint8_t features[8]; /* Page 0 features; extended pages follow */
+} __packed;
+
+#define BT_HCI_OP_LE_CONN_RATE_REQUEST BT_OP(BT_OGF_LE, 0x00A1) /* 0x20A1 */
+struct bt_hci_cp_le_conn_rate_request {
+	uint16_t handle;
+	uint16_t conn_interval_min; /* 125us units, range 0x0003~0x7D00 */
+	uint16_t conn_interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+	uint16_t min_ce_length; /* 125us units, range 0x0001~0x7CFF */
+	uint16_t max_ce_length; /* 125us units, range 0x0001~0x7CFF */
+} __packed;
+
+#define BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMS BT_OP(BT_OGF_LE, 0x00A2) /* 0x20A2 */
+struct bt_hci_cp_le_set_default_rate_params {
+	uint16_t conn_interval_min;
+	uint16_t conn_interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+} __packed;
+
+#define BT_HCI_OP_LE_READ_MIN_SUPPORTED_CONN_INTERVAL BT_OP(BT_OGF_LE, 0x00A3) /* 0x20A3 */
+struct bt_hci_rp_le_read_min_supported_conn_interval {
+	uint8_t status;
+	uint8_t min_conn_interval; /* 125us units, 1 octet per BT 6.0 spec */
+	uint8_t num_groups;
+	/* Followed by variable-length groups:
+	 * struct { uint16_t min; uint16_t max; uint16_t stride; } groups[];
+	 */
+} __packed;
+
+#define BT_HCI_LE_INTERVAL_UNIT_US 125
+
+#define BT_HCI_LE_CONN_INTERVAL_MIN 0x0003
+#define BT_HCI_LE_CONN_INTERVAL_MAX 0x7D00
 
 #define BT_HCI_CTL_TO_HOST_FLOW_DISABLE         0x00
 #define BT_HCI_CTL_TO_HOST_FLOW_ENABLE          0x01
@@ -3634,6 +3703,17 @@ struct bt_hci_evt_le_subrate_change {
 	uint16_t supervision_timeout;
 } __packed;
 
+#define BT_HCI_EVT_LE_CONN_RATE_CHANGE 0x37
+struct bt_hci_evt_le_conn_rate_change {
+	uint8_t status;
+	uint16_t handle;
+	uint16_t conn_interval; /* 125us units */
+	uint16_t peripheral_latency;
+	uint16_t subrate_factor;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+} __packed;
+
 #define BT_HCI_LE_CS_INITIATOR_ROLE_MASK BIT(0)
 #define BT_HCI_LE_CS_REFLECTOR_ROLE_MASK BIT(1)
 
@@ -4099,6 +4179,8 @@ struct bt_hci_evt_le_cs_procedure_enable_complete {
 #define BT_EVT_MASK_LE_TRANSMIT_POWER_REPORTING  BT_EVT_BIT(32)
 #define BT_EVT_MASK_LE_BIGINFO_ADV_REPORT        BT_EVT_BIT(33)
 #define BT_EVT_MASK_LE_SUBRATE_CHANGE            BT_EVT_BIT(34)
+#define BT_EVT_MASK_LE_READ_ALL_REMOTE_FEAT_COMPLETE BT_EVT_BIT(42)
+#define BT_EVT_MASK_LE_CONN_RATE_CHANGE          BT_EVT_BIT(54)
 
 #define BT_EVT_MASK_LE_PER_ADV_SYNC_ESTABLISHED_V2 BT_EVT_BIT(35)
 #define BT_EVT_MASK_LE_PER_ADVERTISING_REPORT_V2   BT_EVT_BIT(36)
