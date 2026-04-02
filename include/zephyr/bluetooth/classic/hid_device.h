@@ -77,6 +77,7 @@ struct bt_hid_device {
 
 	uint8_t state;
 	uint8_t pending_vc_unplug;
+	uint8_t idle_rate;
 };
 
 /** @brief HID Device callbacks. */

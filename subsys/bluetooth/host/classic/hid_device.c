@@ -437,6 +437,7 @@ static int bt_hid_l2cap_ctrl_recv(struct bt_l2cap_chan *chan, struct net_buf *bu
 {
 	struct bt_hid_header *hdr;
 	enum bt_hid_session_role role;
+	struct bt_hid_device *hid;
 
 	if (chan == NULL) {
 		LOG_ERR("Invalid hid chan");
@@ -459,6 +460,8 @@ static int bt_hid_l2cap_ctrl_recv(struct bt_l2cap_chan *chan, struct net_buf *bu
 
 	LOG_DBG("HID CTRL recv type[0x%x] param[0x%x]", hdr->type, hdr->param);
 
+	hid = HID_DEVICE_BY_CTRL_CHAN(chan);
+
 	switch (hdr->type) {
 	case BT_HID_TYPE_CONTROL:
 		hid_control_handle(chan, buf, hdr->param);
@@ -474,6 +477,28 @@ static int bt_hid_l2cap_ctrl_recv(struct bt_l2cap_chan *chan, struct net_buf *bu
 		break;
 	case BT_HID_TYPE_SET_PROTOCOL:
 		hid_set_protocol_handle(chan, buf, hdr->param);
+		break;
+	case BT_HID_TYPE_GET_IDLE:
+		hid_send_data(&hid->ctrl_session, BT_HID_REPORT_TYPE_OTHER,
+			      &hid->idle_rate, sizeof(hid->idle_rate));
+		break;
+	case BT_HID_TYPE_SET_IDLE:
+		if (buf->len != 1) {
+			LOG_ERR("HID set idle invalid len:%d", buf->len);
+			hid_send_handshake(HID_SESSION_BY_CHAN(chan),
+					   BT_HID_HANDSHAKE_RSP_ERR_INVALID_PARAM);
+			break;
+		}
+		hid->idle_rate = buf->data[0];
+		if (hid->idle_rate) {
+			LOG_WRN("HID idle_rate %d ms not supported",
+				hid->idle_rate * 4);
+			hid_send_handshake(HID_SESSION_BY_CHAN(chan),
+					   BT_HID_HANDSHAKE_RSP_ERR_INVALID_PARAM);
+		} else {
+			hid_send_handshake(HID_SESSION_BY_CHAN(chan),
+					   BT_HID_HANDSHAKE_RSP_SUCCESS);
+		}
 		break;
 	default:
 		LOG_ERR("HID type:%d not handle", hdr->type);
