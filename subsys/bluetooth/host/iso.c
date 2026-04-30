@@ -788,7 +788,7 @@ static uint16_t iso_chan_max_data_len(const struct bt_iso_chan *chan)
 {
 	size_t max_controller_data_len;
 	uint16_t max_data_len;
-	struct bt_dev *hdev = chan->conn->hdev;
+	struct bt_dev *hdev = chan->iso->hdev;
 
 	if (chan->qos->tx == NULL) {
 		return 0;
@@ -1127,13 +1127,21 @@ static void store_cis_info(const struct bt_hci_evt_le_cis_established *evt,
 	peripheral->flush_timeout = info->iso_interval * evt->p_ft;
 }
 
-void hci_le_cis_established(struct net_buf *buf)
+void hci_le_cis_established(struct bt_dev *hdev, struct net_buf *buf)
 {
 	struct bt_hci_evt_le_cis_established *evt = (void *)buf->data;
 	uint16_t handle = sys_le16_to_cpu(evt->conn_handle);
 	struct bt_conn *iso;
 
 	LOG_DBG("status 0x%02x %s handle %u", evt->status, bt_hci_err_to_str(evt->status), handle);
+
+	LOG_DBG("CIS established: nse %u c_bn %u p_bn %u c_ft %u p_ft %u "
+		"interval %u (=%u us) c_pdu %u p_pdu %u",
+		evt->nse, evt->c_bn, evt->p_bn, evt->c_ft, evt->p_ft,
+		sys_le16_to_cpu(evt->interval),
+		BT_GAP_ISO_INTERVAL_TO_US(sys_le16_to_cpu(evt->interval)),
+		sys_le16_to_cpu(evt->c_max_pdu),
+		sys_le16_to_cpu(evt->p_max_pdu));
 
 	/* ISO connection handles are already assigned at this point */
 	iso = bt_conn_lookup_handle(hdev, handle, BT_CONN_TYPE_ISO);
@@ -1838,6 +1846,7 @@ static struct bt_iso_cig *get_free_cig(struct bt_dev *hdev)
 		if (hdev->cigs[i].state == BT_ISO_CIG_STATE_IDLE) {
 			hdev->cigs[i].state = BT_ISO_CIG_STATE_CONFIGURED;
 			hdev->cigs[i].id = i;
+			hdev->cigs[i].hdev = hdev;
 			sys_slist_init(&hdev->cigs[i].cis_channels);
 			return &hdev->cigs[i];
 		}
@@ -2182,7 +2191,7 @@ int bt_iso_cig_reconfigure(struct bt_iso_cig *cig, const struct bt_iso_cig_param
 	/* Used to restore CIG in case of error */
 	existing_num_cis = cig->num_cis;
 
-	err = cig_init_cis(cig, param);
+	err = cig_init_cis(cig->hdev, cig, param);
 	if (err != 0) {
 		LOG_DBG("Could not init CIS %d", err);
 		restore_cig(cig, existing_num_cis);
@@ -2251,7 +2260,7 @@ int bt_iso_cig_terminate(struct bt_iso_cig *cig)
 		return -EINVAL;
 	}
 
-	err = hci_le_remove_cig(cig->id);
+	err = hci_le_remove_cig(cig, cig->id);
 	if (err != 0) {
 		LOG_DBG("Failed to terminate CIG: %d", err);
 		return err;
@@ -2464,9 +2473,16 @@ static bool iso_chans_connecting(struct bt_dev *hdev)
 	return false;
 }
 
-int bt_iso_chan_connect(const struct bt_iso_connect_param *param, size_t count)
+int bt_iso_chan_connect_mc(uint8_t dev_id, const struct bt_iso_connect_param *param, size_t count)
 {
 	int err;
+	struct bt_dev *hdev;
+
+	hdev = bt_dev_get(dev_id);
+	CHECKIF(hdev == NULL) {
+		LOG_DBG("Invalid dev_id %u", dev_id);
+		return -EINVAL;
+	}
 
 	CHECKIF(param == NULL) {
 		LOG_DBG("param is NULL");
@@ -2512,7 +2528,7 @@ int bt_iso_chan_connect(const struct bt_iso_connect_param *param, size_t count)
 		}
 	}
 
-	if (iso_chans_connecting()) {
+	if (iso_chans_connecting(hdev)) {
 		LOG_DBG("There are pending ISO connections");
 		return -EBUSY;
 	}
@@ -2528,7 +2544,7 @@ int bt_iso_chan_connect(const struct bt_iso_connect_param *param, size_t count)
 	}
 #endif /* CONFIG_BT_SMP */
 
-	err = hci_le_create_cis(param->acl->hdev, param, count);
+	err = hci_le_create_cis(hdev, param, count);
 	if (err == -ECANCELED) {
 		LOG_DBG("All channels are pending on security");
 
