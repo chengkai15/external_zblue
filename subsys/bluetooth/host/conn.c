@@ -2178,8 +2178,8 @@ static struct bt_conn *conn_lookup_iso(struct bt_conn *conn)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(hdev->iso_conns); i++) {
-		struct bt_conn *iso = bt_conn_ref(&hdev->iso_conns[i]);
+	for (i = 0; i < ARRAY_SIZE(conn->hdev->iso_conns); i++) {
+		struct bt_conn *iso = bt_conn_ref(&conn->hdev->iso_conns[i]);
 
 		if (iso == NULL) {
 			continue;
