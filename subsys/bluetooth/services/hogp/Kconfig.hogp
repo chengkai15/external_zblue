@@ -1,0 +1,31 @@
+# Bluetooth HID over GATT Profile (HOGP)
+
+config BT_HOGP_DEVICE
+	bool "HID over GATT Profile Device (HOGP Device)"
+	default n
+	depends on BT_CONN
+	help
+	  Enable HID over GATT Profile Device (HOGP Server).
+
+config BT_HOGP_HOST
+	bool "HID over GATT Host (HOGP Host)"
+	default n
+	depends on BT_CONN && BT_GATT_CLIENT
+	help
+	  Enable HID over GATT Profile Host (HOGP Client).
+
+config BT_HOGP_DEVICE_ISO
+	bool "HID ISO feature for HOGP Device (Hybrid Operation Mode)"
+	default n
+	depends on BT_HOGP_DEVICE && BT_ISO_PERIPHERAL
+	help
+	  Enable HID ISO Service on HOGP Device, allowing Input/Output
+	  Reports to be sent over LE Isochronous Channels (HOGP v1.1).
+
+config BT_HOGP_HOST_ISO
+	bool "HID ISO feature for HOGP Host"
+	default n
+	depends on BT_HOGP_HOST && BT_ISO_CENTRAL
+	help
+	  Enable HID ISO Service discovery and Hybrid Operation Mode
+	  on HOGP Host (HOGP v1.1).

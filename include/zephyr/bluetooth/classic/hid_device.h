@@ -39,13 +39,8 @@ enum {
 	BT_HID_PROTOCOL_REPORT_MODE,
 };
 
-/** @brief HID report types in get, set, data */
-enum {
-	BT_HID_REPORT_TYPE_OTHER = 0,
-	BT_HID_REPORT_TYPE_INPUT,
-	BT_HID_REPORT_TYPE_OUTPUT,
-	BT_HID_REPORT_TYPE_FEATURE,
-};
+/* HID Report Type values — see <zephyr/bluetooth/hid.h> */
+#include <zephyr/bluetooth/hid.h>
 
 /** @brief HID seesion role */
 enum bt_hid_session_role {

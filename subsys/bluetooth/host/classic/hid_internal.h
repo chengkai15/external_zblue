@@ -37,8 +37,6 @@
 
 /* Parameters for Protocol Type */
 #define BT_HID_PROTOCOL_MASK      0x01
-#define BT_HID_PROTOCOL_BOOT_MODE 0x00
-#define BT_HID_PROTOCOL_REPORT    0x01
 
 /** @brief HID DEV STATE */
 #define BT_HID_STATE_DISTCONNECTED   0x00

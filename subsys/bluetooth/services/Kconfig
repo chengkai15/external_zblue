@@ -22,4 +22,6 @@ source "$APPSDIR/external/zblue/zblue/subsys/bluetooth/services/ots/Kconfig"
 
 source "$APPSDIR/external/zblue/zblue/subsys/bluetooth/services/bas/Kconfig.bas"
 
+source "$APPSDIR/external/zblue/zblue/subsys/bluetooth/services/hogp/Kconfig.hogp"
+
 endmenu
