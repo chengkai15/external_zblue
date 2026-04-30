@@ -896,7 +896,14 @@ int bt_iso_cig_terminate(struct bt_iso_cig *cig);
  * @retval -ENOTCONN If @kconfig{CONFIG_BT_SMP} is enabled the ACL is not
  *         connected.
  */
-int bt_iso_chan_connect(const struct bt_iso_connect_param *param, size_t count);
+int bt_iso_chan_connect_mc(uint8_t dev_id, const struct bt_iso_connect_param *param, size_t count);
+
+#ifdef CONFIG_BT_ORIGINAL_API
+static inline int bt_iso_chan_connect(const struct bt_iso_connect_param *param, size_t count)
+{
+	return bt_iso_chan_connect_mc(0, param, count);
+}
+#endif
 
 /**
  * @brief Disconnect connected ISO channel
