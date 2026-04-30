@@ -130,6 +130,10 @@ struct bt_conn_le {
 #if defined(CONFIG_BT_SUBRATING)
 	struct bt_conn_le_subrating_info subrate;
 #endif
+
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	uint32_t interval_us;
+#endif
 };
 
 #if defined(CONFIG_BT_CLASSIC)
@@ -335,6 +339,11 @@ struct bt_conn {
 	/* Next buffer should be an ACL/ISO HCI fragment */
 	bool			next_is_frag;
 
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	/** Remote LE features page 1 (bit 64~127), for SCI bit 73 */
+	uint8_t			le_features_page1[8];
+#endif
+
 	/* Must be at the end so that everything else in the structure can be
 	 * memset to zero without affecting the ref.
 	 */
@@ -519,6 +528,9 @@ void notify_path_loss_threshold_report(struct bt_conn *conn,
 
 void notify_subrate_change(struct bt_conn *conn,
 			   struct bt_conn_le_subrate_changed params);
+
+void notify_conn_rate_change(struct bt_conn *conn,
+			     const struct bt_conn_le_conn_rate_changed *params);
 
 void notify_remote_cs_capabilities(struct bt_conn *conn,
 			   struct bt_conn_le_cs_capabilities params);

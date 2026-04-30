@@ -3531,9 +3531,10 @@ static bool le_subrate_common_params_valid(const struct bt_conn_le_subrate_param
 	return true;
 }
 
-int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *params)
+int bt_conn_le_subrate_set_defaults(uint8_t dev_id, const struct bt_conn_le_subrate_param *params)
 {
 	struct bt_hci_cp_le_set_default_subrate *cp;
+	struct bt_dev *hdev;
 	struct net_buf *buf;
 
 	if (!IS_ENABLED(CONFIG_BT_CENTRAL)) {
@@ -3542,6 +3543,11 @@ int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *param
 
 	if (!le_subrate_common_params_valid(params)) {
 		return -EINVAL;
+	}
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev) {
+		return -ENODEV;
 	}
 
 	buf = bt_hci_cmd_create(BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, sizeof(*cp));
@@ -3556,7 +3562,7 @@ int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *param
 	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
 	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
 
-	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, buf, NULL);
+	return bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_SET_DEFAULT_SUBRATE, buf, NULL);
 }
 
 int bt_conn_le_subrate_request(struct bt_conn *conn,
@@ -3590,6 +3596,165 @@ int bt_conn_le_subrate_request(struct bt_conn *conn,
 	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_SUBRATE_REQUEST, buf, NULL);
 }
 #endif /* CONFIG_BT_SUBRATING */
+
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+void notify_conn_rate_change(struct bt_conn *conn,
+			     const struct bt_conn_le_conn_rate_changed *params)
+{
+	struct bt_conn_cb *callback;
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&conn->hdev->conn_ctx->conn_cbs, callback, _node) {
+		if (callback->conn_rate_changed) {
+			callback->conn_rate_changed(conn, params);
+		}
+	}
+
+	STRUCT_SECTION_FOREACH(bt_conn_cb, cb)
+	{
+		if (cb->conn_rate_changed) {
+			cb->conn_rate_changed(conn, params);
+		}
+	}
+}
+
+static bool le_conn_rate_params_valid(const struct bt_conn_le_conn_rate_param *param)
+{
+	if (param->conn_interval_min < BT_HCI_LE_CONN_INTERVAL_MIN ||
+	    param->conn_interval_min > BT_HCI_LE_CONN_INTERVAL_MAX ||
+	    param->conn_interval_max < BT_HCI_LE_CONN_INTERVAL_MIN ||
+	    param->conn_interval_max > BT_HCI_LE_CONN_INTERVAL_MAX ||
+	    param->conn_interval_min > param->conn_interval_max) {
+		return false;
+	}
+
+	if (param->supervision_timeout < 0x000A ||
+	    param->supervision_timeout > 0x0C80) {
+		return false;
+	}
+
+	return true;
+}
+
+int bt_conn_le_conn_rate_set_defaults(uint8_t dev_id, const struct bt_conn_le_conn_rate_param *params)
+{
+	struct bt_hci_cp_le_set_default_rate_params *cp;
+	struct bt_dev *hdev;
+	struct net_buf *buf;
+
+	if (!IS_ENABLED(CONFIG_BT_CENTRAL)) {
+		return -ENOTSUP;
+	}
+
+	if (!le_conn_rate_params_valid(params)) {
+		return -EINVAL;
+	}
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev || !BT_CMD_TEST(hdev->supported_commands, 47, 2)) {
+		return -ENOTSUP;
+	}
+
+	buf = bt_hci_cmd_create(BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMS, sizeof(*cp));
+	if (!buf) {
+		return -ENOBUFS;
+	}
+
+	cp = net_buf_add(buf, sizeof(*cp));
+	cp->conn_interval_min = sys_cpu_to_le16(params->conn_interval_min);
+	cp->conn_interval_max = sys_cpu_to_le16(params->conn_interval_max);
+	cp->max_latency = sys_cpu_to_le16(params->max_latency);
+	cp->subrate_min = sys_cpu_to_le16(params->subrate_min);
+	cp->subrate_max = sys_cpu_to_le16(params->subrate_max);
+	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
+	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
+
+	return bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMS, buf, NULL);
+}
+
+int bt_conn_le_conn_rate_request(struct bt_conn *conn,
+				 const struct bt_conn_le_conn_rate_param *params)
+{
+	struct bt_hci_cp_le_conn_rate_request *cp;
+	struct net_buf *buf;
+
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return -EINVAL;
+	}
+
+	if (!le_conn_rate_params_valid(params)) {
+		return -EINVAL;
+	}
+
+	if (!BT_CMD_TEST(conn->hdev->supported_commands, 47, 1)) {
+		return -ENOTSUP;
+	}
+
+	buf = bt_hci_cmd_create(BT_HCI_OP_LE_CONN_RATE_REQUEST, sizeof(*cp));
+	if (!buf) {
+		return -ENOBUFS;
+	}
+
+	cp = net_buf_add(buf, sizeof(*cp));
+	cp->handle = sys_cpu_to_le16(conn->handle);
+	cp->conn_interval_min = sys_cpu_to_le16(params->conn_interval_min);
+	cp->conn_interval_max = sys_cpu_to_le16(params->conn_interval_max);
+	cp->max_latency = sys_cpu_to_le16(params->max_latency);
+	cp->subrate_min = sys_cpu_to_le16(params->subrate_min);
+	cp->subrate_max = sys_cpu_to_le16(params->subrate_max);
+	cp->continuation_number = sys_cpu_to_le16(params->continuation_number);
+	cp->supervision_timeout = sys_cpu_to_le16(params->supervision_timeout);
+	cp->min_ce_length = sys_cpu_to_le16(params->min_ce_length);
+	cp->max_ce_length = sys_cpu_to_le16(params->max_ce_length);
+
+	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_CONN_RATE_REQUEST, buf, NULL);
+}
+
+int bt_conn_le_read_min_conn_interval_groups(uint8_t dev_id, struct bt_conn_le_min_conn_interval_info *info)
+{
+	struct bt_hci_rp_le_read_min_supported_conn_interval *rp;
+	struct bt_dev *hdev;
+	struct net_buf *rsp;
+	int err;
+	uint8_t i;
+	const uint8_t *data;
+
+	if (!info) {
+		return -EINVAL;
+	}
+
+	memset(info, 0, sizeof(*info));
+
+	hdev = bt_dev_get(dev_id);
+	if (!hdev || !BT_CMD_TEST(hdev->supported_commands, 47, 3)) {
+		return -ENOTSUP;
+	}
+
+	err = bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_READ_MIN_SUPPORTED_CONN_INTERVAL,
+				   NULL, &rsp);
+	if (err) {
+		return err;
+	}
+
+	rp = (void *)rsp->data;
+	info->min_conn_interval = rp->min_conn_interval;
+	info->num_groups = rp->num_groups;
+
+	if (info->num_groups > ARRAY_SIZE(info->groups)) {
+		info->num_groups = ARRAY_SIZE(info->groups);
+	}
+
+	data = (const uint8_t *)rp + sizeof(*rp);
+	for (i = 0; i < info->num_groups; i++) {
+		info->groups[i].min_interval = sys_get_le16(data);
+		info->groups[i].max_interval = sys_get_le16(data + 2);
+		info->groups[i].stride = sys_get_le16(data + 4);
+		data += 6;
+	}
+
+	net_buf_unref(rsp);
+	return 0;
+}
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
 
 #if defined(CONFIG_BT_CHANNEL_SOUNDING)
 void notify_remote_cs_capabilities(struct bt_conn *conn, struct bt_conn_le_cs_capabilities params)

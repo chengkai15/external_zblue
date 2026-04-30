@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifndef BT_HCI_CORE_H_
+#define BT_HCI_CORE_H_
 #include <zephyr/devicetree.h>
 #include "conn_internal.h"
 #include "iso_internal.h"
@@ -694,3 +696,5 @@ bool bt_drv_quirk_no_auto_dle(struct bt_dev *hdev);
 void bt_tx_irq_raise(struct bt_dev *hdev);
 void bt_send_one_host_num_completed_packets(struct bt_dev *hdev, uint16_t handle);
 void bt_acl_set_ncp_sent(struct net_buf *packet, bool value);
+
+#endif /* BT_HCI_CORE_H_ */
