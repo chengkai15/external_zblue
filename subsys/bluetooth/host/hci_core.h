@@ -282,6 +282,14 @@ struct bt_le_per_adv_sync {
 struct bt_dev_le {
 	/* LE features */
 	uint8_t			features[8];
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+	/* LE Extended Features: max page index supported by local Controller
+	 * (fetched via HCI_LE_Read_All_Local_Supported_Features 0x2087).
+	 */
+	uint8_t			local_features_max_page;
+	/* LE features page 1 (bits 64-127), includes SCI bits 72/73 */
+	uint8_t			local_features_page1[8];
+#endif
 	/* LE states */
 	uint64_t			states;
 

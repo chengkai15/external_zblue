@@ -1114,19 +1114,37 @@ static void hci_disconn_complete(struct bt_dev *hdev, struct net_buf *buf)
 
 int bt_hci_le_read_remote_features(struct bt_conn *conn)
 {
-	struct bt_hci_cp_le_read_remote_features *cp;
 	struct net_buf *buf;
+	uint16_t opcode;
 
-	buf = bt_hci_cmd_create(BT_HCI_OP_LE_READ_REMOTE_FEATURES,
-				sizeof(*cp));
-	if (!buf) {
-		return -ENOBUFS;
+	if (BT_CMD_TEST(conn->hdev->supported_commands, 47, 3)) {
+		struct bt_hci_cp_le_read_all_remote_features *cp_all;
+
+		opcode = BT_HCI_OP_LE_READ_ALL_REMOTE_FEATURES;
+		buf = bt_hci_cmd_create(opcode, sizeof(*cp_all));
+		if (!buf) {
+			return -ENOBUFS;
+		}
+		cp_all = net_buf_add(buf, sizeof(*cp_all));
+		cp_all->handle = sys_cpu_to_le16(conn->handle);
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+		cp_all->max_page = conn->hdev->le.local_features_max_page;
+#else
+		cp_all->max_page = 0;
+#endif
+	} else {
+		struct bt_hci_cp_le_read_remote_features *cp_std;
+
+		opcode = BT_HCI_OP_LE_READ_REMOTE_FEATURES;
+		buf = bt_hci_cmd_create(opcode, sizeof(*cp_std));
+		if (!buf) {
+			return -ENOBUFS;
+		}
+		cp_std = net_buf_add(buf, sizeof(*cp_std));
+		cp_std->handle = sys_cpu_to_le16(conn->handle);
 	}
 
-	cp = net_buf_add(buf, sizeof(*cp));
-	cp->handle = sys_cpu_to_le16(conn->handle);
-	/* Results in BT_HCI_EVT_LE_REMOTE_FEAT_COMPLETE */
-	return bt_hci_cmd_send_sync(conn->hdev, BT_HCI_OP_LE_READ_REMOTE_FEATURES, buf, NULL);
+	return bt_hci_cmd_send_sync(conn->hdev, opcode, buf, NULL);
 }
 
 int bt_hci_read_remote_version(struct bt_conn *conn)
@@ -1841,6 +1859,75 @@ static void le_remote_feat_complete(struct bt_dev *hdev, struct net_buf *buf)
 
 	bt_conn_unref(conn);
 }
+
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+static void le_all_remote_feat_complete(struct bt_dev *hdev, struct net_buf *buf)
+{
+	struct bt_hci_evt_le_read_all_remote_feat_complete *evt;
+	uint16_t handle;
+	struct bt_conn *conn;
+
+	evt = net_buf_pull_mem(buf, sizeof(*evt));
+	handle = sys_le16_to_cpu(evt->handle);
+
+	conn = bt_conn_lookup_handle(hdev, handle, BT_CONN_TYPE_LE);
+	if (!conn) {
+		LOG_ERR("Unable to lookup conn for handle %u", handle);
+		return;
+	}
+
+	if (evt->status) {
+		LOG_WRN("Remote features read failed, status=0x%02x %s",
+			evt->status, bt_hci_err_to_str(evt->status));
+		goto out;
+	}
+
+	memcpy(conn->le.features, evt->features, sizeof(conn->le.features));
+
+	if (evt->max_page == 0) {
+		LOG_DBG("Remote features: only page 0 available");
+		memset(conn->le_features_page1, 0,
+		       sizeof(conn->le_features_page1));
+		goto out;
+	}
+
+	if (buf->len < sizeof(conn->le_features_page1)) {
+		LOG_WRN("Remote features: max_page=%u but payload truncated "
+			"(len=%u)", evt->max_page, buf->len);
+		memset(conn->le_features_page1, 0,
+		       sizeof(conn->le_features_page1));
+		goto out;
+	}
+
+	memcpy(conn->le_features_page1, buf->data,
+	       sizeof(conn->le_features_page1));
+
+	LOG_DBG("Remote features: max_page=%u, "
+		"page1[0..3]=%02x %02x %02x %02x",
+		evt->max_page,
+		conn->le_features_page1[0],
+		conn->le_features_page1[1],
+		conn->le_features_page1[2],
+		conn->le_features_page1[3]);
+
+out:
+	atomic_set_bit(conn->flags, BT_CONN_LE_FEATURES_EXCHANGED);
+
+	/* Notify the application once remote info is complete.
+	 *
+	 * When CONFIG_BT_REMOTE_VERSION is also enabled, the version read is
+	 * issued after the feature exchange and notify_remote_info() will be
+	 * called from le_remote_version_complete() instead. Skipping the
+	 * notification here avoids double-notifying the application.
+	 */
+	if (IS_ENABLED(CONFIG_BT_REMOTE_INFO) &&
+	    !IS_ENABLED(CONFIG_BT_REMOTE_VERSION)) {
+		notify_remote_info(conn);
+	}
+
+	bt_conn_unref(conn);
+}
+#endif
 
 #if defined(CONFIG_BT_DATA_LEN_UPDATE)
 static void le_data_len_change(struct bt_dev *hdev, struct net_buf *buf)
@@ -2816,6 +2903,52 @@ void bt_hci_le_subrate_change_event(struct bt_dev *hdev, struct net_buf *buf)
 }
 #endif /* CONFIG_BT_SUBRATING */
 
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+void bt_hci_le_conn_rate_change_event(struct bt_dev *hdev, struct net_buf *buf)
+{
+	struct bt_hci_evt_le_conn_rate_change *evt;
+	struct bt_conn_le_conn_rate_changed params;
+	struct bt_conn *conn;
+	uint16_t handle;
+
+	evt = net_buf_pull_mem(buf, sizeof(*evt));
+	handle = sys_le16_to_cpu(evt->handle);
+
+	LOG_DBG("conn_rate_change: status=0x%02x handle=%u interval=%u "
+	       "latency=%u subrate=%u cont=%u timeout=%u",
+	       evt->status, handle,
+	       sys_le16_to_cpu(evt->conn_interval),
+	       sys_le16_to_cpu(evt->peripheral_latency),
+	       sys_le16_to_cpu(evt->subrate_factor),
+	       sys_le16_to_cpu(evt->continuation_number),
+	       sys_le16_to_cpu(evt->supervision_timeout));
+
+	conn = bt_conn_lookup_handle(hdev, handle, BT_CONN_TYPE_LE);
+	if (!conn) {
+		LOG_ERR("No connection for handle %u", handle);
+		return;
+	}
+
+	params.status = evt->status;
+	params.conn_interval = sys_le16_to_cpu(evt->conn_interval);
+	params.peripheral_latency = sys_le16_to_cpu(evt->peripheral_latency);
+	params.subrate_factor = sys_le16_to_cpu(evt->subrate_factor);
+	params.continuation_number = sys_le16_to_cpu(evt->continuation_number);
+	params.supervision_timeout = sys_le16_to_cpu(evt->supervision_timeout);
+
+	if (evt->status == BT_HCI_ERR_SUCCESS) {
+		conn->le.interval = params.conn_interval;
+		conn->le.interval_us = BT_CONN_SCI_INTERVAL_TO_US(params.conn_interval);
+		conn->le.latency = params.peripheral_latency;
+		conn->le.timeout = params.supervision_timeout;
+	}
+
+	notify_conn_rate_change(conn, &params);
+
+	bt_conn_unref(conn);
+}
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
+
 static const struct event_handler vs_events[] = {
 #if defined(CONFIG_BT_DF_VS_CL_IQ_REPORT_16_BITS_IQ_SAMPLES)
 	EVENT_HANDLER(BT_HCI_EVT_VS_LE_CONNECTIONLESS_IQ_REPORT,
@@ -2871,6 +3004,11 @@ static const struct event_handler meta_events[] = {
 	EVENT_HANDLER(BT_HCI_EVT_LE_REMOTE_FEAT_COMPLETE,
 		      le_remote_feat_complete,
 		      sizeof(struct bt_hci_evt_le_remote_feat_complete)),
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+	EVENT_HANDLER(BT_HCI_EVT_LE_READ_ALL_REMOTE_FEAT_COMPLETE,
+		      le_all_remote_feat_complete,
+		      sizeof(struct bt_hci_evt_le_read_all_remote_feat_complete)),
+#endif
 	EVENT_HANDLER(BT_HCI_EVT_LE_CONN_PARAM_REQ, le_conn_param_req,
 		      sizeof(struct bt_hci_evt_le_conn_param_req)),
 #if defined(CONFIG_BT_DATA_LEN_UPDATE)
@@ -2965,6 +3103,10 @@ static const struct event_handler meta_events[] = {
 	EVENT_HANDLER(BT_HCI_EVT_LE_SUBRATE_CHANGE, bt_hci_le_subrate_change_event,
 		      sizeof(struct bt_hci_evt_le_subrate_change)),
 #endif /* CONFIG_BT_PATH_LOSS_MONITORING */
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	EVENT_HANDLER(BT_HCI_EVT_LE_CONN_RATE_CHANGE, bt_hci_le_conn_rate_change_event,
+		      sizeof(struct bt_hci_evt_le_conn_rate_change)),
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
 #if defined(CONFIG_BT_PER_ADV_SYNC_RSP)
 	EVENT_HANDLER(BT_HCI_EVT_LE_PER_ADVERTISING_REPORT_V2, bt_hci_le_per_adv_report_v2,
 		      sizeof(struct bt_hci_evt_le_per_advertising_report_v2)),
@@ -3231,6 +3373,90 @@ static void read_le_features_complete(struct bt_dev *hdev, struct net_buf *buf)
 	memcpy(hdev->le.features, rp->features, sizeof(hdev->le.features));
 }
 
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+/*
+ * LE Read All Local Supported Features (BT 6.0+).
+ *
+ * Fetches the local Controller's extended LE feature pages and caches them in
+ * hdev->le.local_features_max_page / local_features_page1[]. The cached
+ * max_page is later passed to the remote-feature query so that the Controller
+ * returns every page the Host can parse (e.g. SCI bits live in page 1).
+ */
+static int read_all_local_features(struct bt_dev *hdev)
+{
+	struct bt_hci_rp_le_read_all_local_features *rp;
+	struct net_buf *rsp;
+	size_t expected_len;
+	uint8_t max_page;
+	int err;
+
+	if (!BT_CMD_TEST(hdev->supported_commands, 47, 2)) {
+		/* Controller does not expose the extended local-features
+		 * command; no additional feature pages to fetch. Keep
+		 * local_features_max_page == 0 so later code falls back to
+		 * page 0 only.
+		 */
+		return 0;
+	}
+
+	err = bt_hci_cmd_send_sync(hdev, BT_HCI_OP_LE_READ_ALL_LOCAL_FEATURES,
+				   NULL, &rsp);
+	if (err) {
+		LOG_WRN("Read all local features command failed: %d", err);
+		return 0;
+	}
+
+	if (rsp->len < sizeof(*rp)) {
+		LOG_WRN("Read all local features: short response (%u bytes)",
+			rsp->len);
+		net_buf_unref(rsp);
+		return 0;
+	}
+
+	rp = (void *)rsp->data;
+	max_page = rp->max_page;
+
+	/* Clamp to the host's compiled-in upper bound */
+	if (max_page > CONFIG_BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE) {
+		max_page = CONFIG_BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE;
+	}
+
+	expected_len = sizeof(*rp) + (size_t)max_page * sizeof(hdev->le.local_features_page1);
+	if (rsp->len < expected_len) {
+		LOG_WRN("Read all local features: truncated payload, "
+			"have %u expected %zu", rsp->len, expected_len);
+		net_buf_unref(rsp);
+		return 0;
+	}
+
+	hdev->le.local_features_max_page = max_page;
+
+	/* Page 0: keep hdev->le.features authoritative (already populated by
+	 * LE Read Local Supported Features). Optionally refresh if the two
+	 * disagree.
+	 */
+
+	if (max_page >= 1) {
+		memcpy(hdev->le.local_features_page1,
+		       rsp->data + sizeof(*rp),
+		       sizeof(hdev->le.local_features_page1));
+		LOG_DBG("Local features page 1: "
+			"%02x %02x %02x %02x %02x %02x %02x %02x",
+			hdev->le.local_features_page1[0],
+			hdev->le.local_features_page1[1],
+			hdev->le.local_features_page1[2],
+			hdev->le.local_features_page1[3],
+			hdev->le.local_features_page1[4],
+			hdev->le.local_features_page1[5],
+			hdev->le.local_features_page1[6],
+			hdev->le.local_features_page1[7]);
+	}
+
+	net_buf_unref(rsp);
+	return 0;
+}
+#endif /* CONFIG_BT_LE_EXTENDED_FEAT_SET */
+
 #if defined(CONFIG_BT_CONN)
 #if !defined(CONFIG_BT_CLASSIC)
 static void read_buffer_size_complete(struct bt_dev *hdev, struct net_buf *buf)
@@ -3484,6 +3710,9 @@ static int le_set_event_mask(struct bt_dev *hdev)
 
 		mask |= BT_EVT_MASK_LE_CONN_UPDATE_COMPLETE;
 		mask |= BT_EVT_MASK_LE_REMOTE_FEAT_COMPLETE;
+		if (IS_ENABLED(CONFIG_BT_LE_EXTENDED_FEAT_SET)) {
+			mask |= BT_EVT_MASK_LE_READ_ALL_REMOTE_FEAT_COMPLETE;
+		}
 
 		if (BT_FEAT_LE_CONN_PARAM_REQ_PROC(hdev->le.features)) {
 			mask |= BT_EVT_MASK_LE_CONN_PARAM_REQ;
@@ -3510,6 +3739,10 @@ static int le_set_event_mask(struct bt_dev *hdev)
 		if (IS_ENABLED(CONFIG_BT_SUBRATING) &&
 		    BT_FEAT_LE_CONN_SUBRATING(hdev->le.features)) {
 			mask |= BT_EVT_MASK_LE_SUBRATE_CHANGE;
+		}
+
+		if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+			mask |= BT_EVT_MASK_LE_CONN_RATE_CHANGE;
 		}
 	}
 
@@ -3658,6 +3891,13 @@ static int le_init(struct bt_dev *hdev)
 	read_le_features_complete(hdev, rsp);
 	net_buf_unref(rsp);
 
+#if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+	/* Fetch extended feature pages (BT 6.0+). Must run before any code
+	 * that depends on hdev->le.local_features_max_page or local_features_page1.
+	 */
+	(void)read_all_local_features(hdev);
+#endif
+
 	if (IS_ENABLED(CONFIG_BT_ISO) &&
 	    BT_FEAT_LE_ISO(hdev->le.features)) {
 		err = le_init_iso(hdev);
@@ -3803,6 +4043,15 @@ static int le_init(struct bt_dev *hdev)
 		err = le_set_host_feature(hdev, BT_LE_FEAT_BIT_CONN_SUBRATING_HOST_SUPP, 1);
 		if (err) {
 			return err;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)) {
+		err = le_set_host_feature(hdev, BT_LE_FEAT_BIT_SCI_HOST_SUPP, 1);
+		if (err) {
+			LOG_WRN("LE_Set_Host_Feature(SCI) failed: %d", err);
+		} else {
+			LOG_DBG("LE_Set_Host_Feature(SCI) OK");
 		}
 	}
 

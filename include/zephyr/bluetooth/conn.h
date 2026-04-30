@@ -248,6 +248,46 @@ struct bt_conn_le_subrate_changed {
 	uint16_t supervision_timeout;
 };
 
+/** SCI connection rate change parameters */
+struct bt_conn_le_conn_rate_changed {
+	uint8_t status;
+	uint16_t conn_interval; /**< 125us units */
+	uint16_t peripheral_latency;
+	uint16_t subrate_factor;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+};
+
+/** SCI connection rate request parameters */
+struct bt_conn_le_conn_rate_param {
+	uint16_t conn_interval_min; /**< 125us units, range 0x0003~0x7D00 */
+	uint16_t conn_interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+	uint16_t min_ce_length; /**< 125us units, range 0x0001~0x7CFF */
+	uint16_t max_ce_length; /**< 125us units, range 0x0001~0x7CFF */
+};
+
+/** SCI minimum connection interval group */
+struct bt_conn_le_min_conn_interval_group {
+	uint16_t min_interval; /**< 125us units */
+	uint16_t max_interval;
+	uint16_t stride;
+};
+
+/** SCI minimum connection interval info */
+struct bt_conn_le_min_conn_interval_info {
+	uint16_t min_conn_interval; /**< 125us units */
+	uint8_t num_groups;
+	struct bt_conn_le_min_conn_interval_group groups[4]; /**< max 4 groups */
+};
+
+/** Convert SCI interval (125us units) to microseconds */
+#define BT_CONN_SCI_INTERVAL_TO_US(interval) ((uint32_t)(interval) * 125U)
+
 /** Connection Type */
 enum __packed bt_conn_type {
 	/** LE Connection Type */
@@ -1219,6 +1259,19 @@ int bt_conn_le_set_path_loss_mon_enable(struct bt_conn *conn, bool enable);
  */
 int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *params);
 
+/** @brief Set Subrating Defaults (multi-controller variant).
+ *
+ *  Same as @ref bt_conn_le_subrate_set_defaults but targets the controller
+ *  identified by @p dev_id. For single-controller builds, pass dev_id = 0.
+ *
+ *  @param dev_id Controller identifier.
+ *  @param params Subrating parameters.
+ *
+ *  @return Zero on success or (negative) error code on failure.
+ */
+int bt_conn_le_subrate_set_defaults_mc(uint8_t dev_id,
+				       const struct bt_conn_le_subrate_param *params);
+
 /** @brief Request New Subrating Parameters.
  *
  *  Request a change to the subrating parameters of a connection.
@@ -1233,6 +1286,32 @@ int bt_conn_le_subrate_set_defaults(const struct bt_conn_le_subrate_param *param
  */
 int bt_conn_le_subrate_request(struct bt_conn *conn,
 			       const struct bt_conn_le_subrate_param *params);
+
+/** @brief Request a connection rate change (SCI).
+ *
+ *  @param conn   Connection object.
+ *  @param params Connection rate parameters (125us units).
+ *
+ *  @return Zero on success or (negative) error code on failure.
+ */
+int bt_conn_le_conn_rate_request(struct bt_conn *conn,
+				 const struct bt_conn_le_conn_rate_param *params);
+
+/** @brief Set default connection rate parameters (SCI).
+ *
+ *  @param params Default rate parameters.
+ *
+ *  @return Zero on success or (negative) error code on failure.
+ */
+int bt_conn_le_conn_rate_set_defaults(uint8_t dev_id, const struct bt_conn_le_conn_rate_param *params);
+
+/** @brief Read minimum supported connection interval groups (SCI).
+ *
+ *  @param info Output: minimum connection interval info from Controller.
+ *
+ *  @return Zero on success or (negative) error code on failure.
+ */
+int bt_conn_le_read_min_conn_interval_groups(uint8_t dev_id, struct bt_conn_le_min_conn_interval_info *info);
 
 /** @brief Update the connection parameters.
  *
@@ -1999,6 +2078,16 @@ struct bt_conn_cb {
 	void (*subrate_changed)(struct bt_conn *conn,
 				const struct bt_conn_le_subrate_changed *params);
 #endif /* CONFIG_BT_SUBRATING */
+
+#if defined(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
+	/** @brief SCI Connection Rate Changed callback.
+	 *
+	 *  @param conn   Connection object.
+	 *  @param params Connection rate change parameters.
+	 */
+	void (*conn_rate_changed)(struct bt_conn *conn,
+				 const struct bt_conn_le_conn_rate_changed *params);
+#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
 
 #if defined(CONFIG_BT_CHANNEL_SOUNDING)
 	/** @brief LE CS Read Remote Supported Capabilities Complete event.
