@@ -2201,6 +2201,10 @@ static void foreach_attr_type_dyndb(struct bt_dev *hdev, uint16_t start_handle, 
 	size_t i;
 	struct bt_gatt_service *svc;
 
+	if (sys_slist_is_empty(&hdev->gatt_ctx->db)) {
+		syslog(3, "[GATT] dyndb empty for hdev:%p dev_id:%d\n", hdev, hdev->dev_id);
+	}
+
 	SYS_SLIST_FOR_EACH_CONTAINER(&hdev->gatt_ctx->db, svc, node) {
 		struct bt_gatt_service *next;
 
@@ -5058,8 +5062,9 @@ static void gatt_read_rsp(struct bt_conn *conn, int err, const void *pdu,
 		return;
 	}
 
+	LOG_DBG("gatt_read_rsp: length=%u _att_mtu=%u, check long read",
+		length, params->_att_mtu);
 	/*
-	 * Core Spec 4.2, Vol. 3, Part G, 4.8.1
 	 * If the Characteristic Value is greater than (ATT_MTU - 1) octets
 	 * in length, the Read Long Characteristic Value procedure may be used
 	 * if the rest of the Characteristic Value is required.

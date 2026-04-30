@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <zephyr/sys/atomic.h>
+
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/check.h>
 #include <zephyr/sys/iterable_sections.h>
@@ -1792,7 +1793,7 @@ static void perform_auto_initiated_procedures(struct bt_conn *conn, void *unused
 	    can_initiate_feature_exchange(conn)) {
 		err = bt_hci_le_read_remote_features(conn);
 		if (err) {
-			LOG_ERR("Failed read remote features (%d)", err);
+			LOG_WRN("Failed to read remote features (%d)", err);
 		}
 		if (conn->state != BT_CONN_CONNECTED) {
 			return;
@@ -1849,7 +1850,8 @@ static void perform_auto_initiated_procedures(struct bt_conn *conn, void *unused
  */
 static void auto_initiated_procedures(struct k_work *work)
 {
-	struct bt_dev_conn_ctx *conn_ctx = CONTAINER_OF(work, struct bt_dev_conn_ctx, procedures_on_connect);
+	struct bt_dev_conn_ctx *conn_ctx = CONTAINER_OF(work, struct bt_dev_conn_ctx,
+							procedures_on_connect);
 	struct  bt_dev *hdev = conn_ctx->hdev;
 
 	bt_conn_foreach_mc(hdev->dev_id, BT_CONN_TYPE_LE, perform_auto_initiated_procedures, NULL);
@@ -2178,8 +2180,8 @@ static struct bt_conn *conn_lookup_iso(struct bt_conn *conn)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(hdev->iso_conns); i++) {
-		struct bt_conn *iso = bt_conn_ref(&hdev->iso_conns[i]);
+	for (i = 0; i < ARRAY_SIZE(conn->hdev->iso_conns); i++) {
+		struct bt_conn *iso = bt_conn_ref(&conn->hdev->iso_conns[i]);
 
 		if (iso == NULL) {
 			continue;

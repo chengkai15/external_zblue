@@ -1670,10 +1670,12 @@ int bt_setup_public_id_addr(struct bt_dev *hdev)
 		return 0;
 	}
 
+#if defined(CONFIG_BT_PRIVACY)
 	if (!irk_is_empty(hdev->irk[BT_ID_DEFAULT])) {
 		irk = hdev->irk[BT_ID_DEFAULT];
 		goto out;
 	}
+#endif /* defined(CONFIG_BT_PRIVACY) */
 
 #if defined(CONFIG_BT_PRIVACY)
 	uint8_t ir_irk[16];
@@ -1692,7 +1694,9 @@ int bt_setup_public_id_addr(struct bt_dev *hdev)
 	}
 #endif /* defined(CONFIG_BT_PRIVACY) */
 
+#if defined(CONFIG_BT_PRIVACY)
 out:
+#endif /* defined(CONFIG_BT_PRIVACY) */
 	/* If true, `id_create` will randomize the IRK. */
 	if (!irk && IS_ENABLED(CONFIG_BT_PRIVACY)) {
 		/* `id_create` will not store the id when called before BT_DEV_READY.
