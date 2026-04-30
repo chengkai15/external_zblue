@@ -55,12 +55,16 @@
  * ================================================================ */
 
 #define HOGP_DEVICE_MAX_CONNECTIONS  2
-#define REPORT_MAP_MAX_SIZE          512
+#define REPORT_MAP_MAX_SIZE          256
 #define HID_INFO_VAL_SIZE            4
 #define SCI_INFO_MAX_SIZE            (2 + 1 + 4 * 6)
 
+/* Each report needs: chrc(1) + value(1) + CCC(1) + ref(1) = 4 attrs
+ * Base HIDS: primary(1) + protocol_mode(2) + report_map(2) + hid_info(2) + ctrl_point(2) = 9
+ * With SCI: +5 attrs. hogp_device.c overrides this via #define before including this header.
+ */
 #ifndef HOGP_DEVICE_MAX_ATTRS
-#define HOGP_DEVICE_MAX_ATTRS        64
+#define HOGP_DEVICE_MAX_ATTRS   (9 + 4 * BT_HOGP_DEVICE_MAX_REPORTS)
 #endif
 
 #define HID_ISO_SERVICE_ATTR_COUNT   5
@@ -90,7 +94,6 @@
 
 /* HID ISO default report interval in microseconds (5 ms) */
 #define BT_HOGP_ISO_DEFAULT_INTERVAL_US         5000
-
 
 
 /* HID ISO LE HID Operation Mode opcodes (Spec Table 6.10) */
@@ -163,6 +166,7 @@ struct hogp_device_hid_svc {
 struct hogp_device_sci {
 	uint8_t modes;  /* HOGP_DEVICE_SCI_MODE_xxx bitmask */
 	struct _bt_gatt_ccc mode_ccc;
+	const struct bt_gatt_attr *mode_val_attr; /* SCI Mode value attr for notify */
 	uint8_t properties[SCI_INFO_MAX_SIZE];
 	uint16_t properties_len;
 };
@@ -178,7 +182,7 @@ struct hogp_device_iso_svc {
 	struct bt_gatt_chrc op_mode_chrc;
 	bool registered;
 	bool dev_request;
-	uint8_t properties[32];
+	uint8_t properties[BT_HOGP_ISO_PROPERTIES_BUF_SIZE];
 	uint16_t properties_len;
 	uint8_t max_sdu_input;
 	uint8_t max_sdu_output;
@@ -284,7 +288,7 @@ struct hogp_host_conn {
 	struct hogp_host_report reports[BT_HOGP_HOST_MAX_REPORTS];
 	uint8_t num_reports;
 
-	struct hogp_host_ext_report ext_reports[BT_HOGP_HOST_MAX_REPORTS];
+	struct hogp_host_ext_report ext_reports[BT_HOGP_HOST_MAX_EXT_REPORTS];
 	uint8_t num_ext_reports;
 
 	/* DIS */
@@ -307,6 +311,12 @@ struct hogp_host_conn {
 
 	uint16_t rmap_read_offset;
 
+	/* Per-connection HID report descriptor storage (pointed to by
+	 * services[*].desc_offset / desc_len).
+	 */
+	uint8_t desc_storage[BT_HOGP_HOST_DESC_STORAGE_LEN];
+	uint16_t desc_used;
+
 #if defined(CONFIG_BT_HOGP_HOST_ISO)
 	/* HID ISO Service */
 	uint16_t iso_svc_start;
@@ -315,8 +325,14 @@ struct hogp_host_conn {
 	uint16_t iso_op_mode_handle;
 	uint8_t iso_cmd_buf[10]; /* LE HID Op Mode write buffer */
 	bool iso_supported;
-	uint8_t iso_properties_buf[32];
+	uint8_t iso_properties_buf[BT_HOGP_ISO_PROPERTIES_BUF_SIZE];
 	uint16_t iso_properties_len;
+
+	/* Pending ISO interval, used to defer CIG/CIS creation until the
+	 * Device confirms its Select Hybrid write (see iso_op_mode_write_cb).
+	 * 0 means no pending connect.
+	 */
+	uint16_t pending_iso_interval_us;
 
 	/* ISO CIS */
 	struct bt_iso_chan iso_chan;
@@ -326,9 +342,16 @@ struct hogp_host_conn {
 	struct bt_iso_chan_qos iso_qos;
 	bool iso_cis_connected;
 
-	/* ISO Sequence Number tracking (Spec 5.6.2) */
-	uint8_t iso_last_seq[256];
-	bool iso_seq_valid[256];
+	/* ISO Sequence Number tracking (Spec 5.6.1 / 5.6.2).
+	 * Spec limits Hybrid mode to at most 1 Input + 1 Output report
+	 * over ISO, so we only need one tracker per direction.
+	 */
+	struct iso_seq_tracker {
+		uint8_t report_id;
+		uint8_t last_seq;
+		uint8_t seq;        /* next tx seq (output) or last rx seq alias */
+		bool    valid;
+	} iso_input, iso_output;
 	bool iso_confirm_enabled;
 	uint16_t iso_tx_seq;
 #endif
